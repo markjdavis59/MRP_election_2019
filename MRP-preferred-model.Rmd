@@ -1,0 +1,516 @@
+---
+title: "MRP preferred model"
+author: "davis"
+date: "02/09/2021"
+output: html_document
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(knitr)
+```
+### AES data preparation
+AES data as prepared in earlier research. Note this dataset includes non-response levels for variables where there is non-response in the Census.
+```{r message=FALSE}
+## Install and attach packages
+library ("arm")
+library ("lme4")
+library ("lmerTest")
+library("tidyverse")
+library("naniar")
+library("MuMIn")
+# load dataset
+# We use the AES dataset (including non-responses as levels in relevant variables) as organised in MRP_electorate_analysis_2021.Rmd. The code below is replicated from MRP_electorate_analysis_2021.Rmd at lines 646-75.
+detach(package:dplyr)
+detach(package:tidyverse)
+```
+
+```{r message=FALSE}
+data2 <- read.csv("aes19_amended2.csv", sep=",", stringsAsFactors = FALSE)
+# recode 999 as NA
+data2 <- data2 %>% replace_with_na_all(condition = ~.x == 999)
+data2 <- data2 %>% replace_with_na_all(condition = ~.x == "999")
+# subset the data to include only cases where citizenship is Australian or not stated (there are 8 cases of citzenship missing values in the AES data)
+data2 <- subset(data2, citizen!=2)
+# convert relevant variables to factors
+data2$citizen <- as.factor (data2$citizen)
+data2$lab2pp <- as.factor (data2$lab2pp)
+data2$country_born <- as.factor (data2$country_born)
+data2$gender <- as.factor (data2$gender)
+data2$state_name <- as.factor (data2$state_name)
+data2$ced_name <- as.factor (data2$ced_name)
+data2$age_group <- as.factor (data2$age_group)
+data2$education <- as.factor (data2$education)
+data2$income <- as.factor(data2$income)
+# create dependent variable coded TRUE for lab2pp = 2
+data2$lab2pp.2 <- with(data2, lab2pp==2)
+# create new four-level age group variable
+# noting that the final cut-point of 104 reflects the highest age in the data being 103 and 999 being used for missing cases - the earlier coding of the four-level age variable inadvertently included the missing cases as instances of age_group4 level 4
+data2$age_group4 <- cut(data2$age, c(0,34,49,64,104))
+# Create variable for age x education interaction
+# noting that the inclusion of the new fourth level for the education variable now
+# means the age x education interaction has 16 levels (4x4)
+data2$age_group4.education <- 4*(as.numeric(data2$age_group4)-1)+as.numeric(data2$education)
+data2$age_group4.education <- as.factor(data2$age_group4.education)
+# Convert 2016 vote share variable from per cent to fraction (for consistency with PGB)
+data2$ced_2016lab2ppshare.fraction <- (data2$ced_2016lab2ppshare/100)
+```
+### Estimate preferred model on AES data
+```{r fig.width=10, fig.height=8}
+# Estimate model
+model.20 <- glmer(lab2pp.2 ~ age_group4 + ced_2016lab2ppshare.fraction + education + gender +                          country_born + (1|state_name) + (1|ced_name), family=binomial(link="logit"), data=data2)
+summary(model.20)
+```
+
+### Census data preparation
+The Census dataset is used from the earlier research which included "not stated" values for citizenship, education and country of birth as levels in the relevant variables. This is ABS 2016 Census data showing population breakdowns for Commonwealth Electoral Divisions based on the 2019 electoral boundaries.
+```{r}
+# read in census data
+census3 <- read.csv("Census3.csv", sep=",", stringsAsFactors = FALSE, header=TRUE)
+# transform Labor 2PP voteshare variable into fraction (to align with specification in ML models)
+census3$cced_2016lab2ppshare.fraction <- (census3$cced_2016lab2ppshare/100)
+```
+### Post-stratification
+```{r}
+# Generate cell predictions 
+cellpredictions <- invlogit (fixef(model.20)["(Intercept)"]
+    + (fixef(model.20)["age_group4(34,49]"]*census3$cage_group4.34.49)
+    + (fixef(model.20)["age_group4(49,64]"]*census3$cage_group4.49.64)
+    + (fixef(model.20)["age_group4(64,104]"]*census3$cage_group4.64.104)
+    + (fixef(model.20)["ced_2016lab2ppshare.fraction"]*census3$cced_2016lab2ppshare.fraction)
+    + (fixef(model.20)["education2"]*census3$ceducation2)
+    + (fixef(model.20)["education3"]*census3$ceducation3)
+    + (fixef(model.20)["education4"]*census3$ceducation4)               
+    + (fixef(model.20)["gender2"]*census3$cgender2)
+    + (fixef(model.20)["country_born2"]*census3$ccountry_born2)
+    + (fixef(model.20)["country_born3"]*census3$ccountry_born3)
+    + ranef(model.20)$state_name[census3$cstate_name,1]
+    + ranef(model.20)$ced_name[census3$cced_name,1])
+# Weight cell predictions by population frequency of each cell (per CED)
+cellpredictions.weighted <- cellpredictions*census3$cpercent.ced
+# Sum the weighted cell predictions for all cells in each CED
+cedpredictions <- 100*as.table(tapply(cellpredictions.weighted, census3$cced_name, sum))
+```
+### Model 20 results 
+```{r fig.width=8, fig.height=5.7, message=FALSE}
+# reorganise cedpredict
+library("tidyverse")
+library("dplyr")
+cedpredictions <- as.data.frame(cedpredictions)
+cedpredictions <- cedpredictions %>%
+                     rename(
+                       ced = Var1,
+                       predLabTPP = Freq
+                       )
+cedpredictions$predLabwin <- ifelse(cedpredictions$predLabTPP>50,1,0)
+# import 2019 election results (Australian Electoral Commission data showing two-party preferred results by division)
+outcomes <- read.csv("election2019.csv", header=TRUE, stringsAsFactors = TRUE)
+# join the predicted and actual election results
+cedpredictions <- merge(cedpredictions, outcomes, by = "ced")
+cedpredictions$abserror <- abs(cedpredictions$predLabTPP-cedpredictions$LabTPP)
+# calculate results metrics
+MAPE <- round(mean(cedpredictions$abserror),digits=2)
+maxerror <- round(max(cedpredictions$abserror), digits=2)
+predLabwin <- sum(cedpredictions$predLabwin)-2 # Minus 2 removes Clark and Melbourne from the tally
+predcorrect <- sum(ifelse(cedpredictions$predLabwin==cedpredictions$Labwin,1,0))
+# put metrics into a data frame
+metrics <- as.data.frame(rbind(c("Model 20", MAPE, maxerror, predLabwin, predcorrect)))
+colnames(metrics) <- c("", "Mean absolute error (ppts)", "Max error (ppts)", "Predicted Labor wins", "Correct win predictions")
+# display results table
+kable(metrics, caption="**Model 20 (individual fixed effects, state and CED random effects)**")
+# plot predicted vs actual results
+plot(cedpredictions$LabTPP, cedpredictions$predLabTPP, xlim=c(20,80), ylim=c(20,80), main="Model 20", col=ifelse(cedpredictions$predLabTPP>50 & cedpredictions$LabTPP<50, "red", 
+                ifelse(cedpredictions$predLabTPP<50 & cedpredictions$LabTPP>50, "red", "black")))
+abline(0,1)
+abline(v=50, lty=3)
+abline(h=50, lty=3)
+par(mfrow=c(1,2))
+hist(cedpredictions$LabTPP, xlim=c(20,80), ylim=c(0,35))
+hist(cedpredictions$predLabTPP, xlim=c(20,80), ylim=c(0,35))
+```
+
+```{r}
+```
+
+Post-stratifying from Model20 results in electorate TPP predictions with a mean absolute percentage error of 3.4 ppts. Correct win/loss predictions are made in 138 of the 151 seats. Labor is predicted to win more than 50 per cent of the TPP vote in 67 seats (this includes Clark and Melbourne). The maximum error is 10.6 ppts and there are 34 electorates with an error greater than 5.0 ppts.
+
+### Omit electorate random effects from the model
+```{r fig.width=10, fig.height=8}
+# Estimate model
+model.20.A <- glmer(lab2pp.2 ~ age_group4 + ced_2016lab2ppshare.fraction + education + gender +                          country_born + (1|state_name), family=binomial(link="logit"), data=data2)
+summary (model.20.A)
+ranef(model.20.A)
+# plot fixed effects
+library("effects")
+plot(predictorEffects(model.20.A), main="")
+```
+
+```{r}
+```
+### Interpreting model 20.A
+
+The coefficients and plots show:
+
+- Age: People aged 18-34 had a 68 per cent probability of voting 2PP Labor; this fell to around 50 per cent for those aged 35-49, around 49 per cent for those 50-64 and 40 per cent for those aged 65 and over.
+
+- Education: People whose highest educational level was school or post-school qualifications such as trades had a 40 per cent probablity of voting Labor wh=ile those with university educations had a 52 per cent probablity (and those who did not indicate their education level had a 35 per cent probability of voting Labor)
+
+- Gender: Males had a 45 per cent probability of voting Labor while females had a 50 per cent probability
+
+- Country of birth: Australian-born respondents had a 49 per cent probability of voting Labor while those born outside Australia had a 44 per cent probability (and those who did not respond to the question on country of birth had a 49 per cent probability)
+
+- 2016 vote: For every one percentage point increase in a voter's electorate's 2016 Labor TPP vote, there was a 0.78 percentage point increase in the voter's probability of voting Labor in 2016.
+
+- The values of the intercepts are difficult to interpret. The fixed intercept of -1.10 can be interpreted as the mean of the (logit of the) Labor 2PP dependent variable for all voters in the AES survey when the value of Labor's 2016 2PP vote share is zero and for a voter who is male, has school level education, is aged 18-34 and born in Australia. The intercepts for the state random effects can be interpreted as the means of the dependent variable (for this deomgraphic "reference case" voter) across voters in each of the state groups or clusters. These state intercepts range from +0.23 for the ACT, (indicating that a voter in the ACT is 5.5 percentage points more likely to vote 2PP Labor than the mean across the whole sample for the demographic reference case voter) to -0.24 for Queensland (indicating Queenslanders were 6 percentage points less likely to vote 2PP Labor compared to the sample-wide average average).
+```{r}
+# post-stratify
+cellpredictions.A <- invlogit (fixef(model.20.A)["(Intercept)"]
+    + (fixef(model.20.A)["age_group4(34,49]"]*census3$cage_group4.34.49)
+    + (fixef(model.20.A)["age_group4(49,64]"]*census3$cage_group4.49.64)
+    + (fixef(model.20.A)["age_group4(64,104]"]*census3$cage_group4.64.104)
+    + (fixef(model.20.A)["ced_2016lab2ppshare.fraction"]*census3$cced_2016lab2ppshare.fraction)
+    + (fixef(model.20.A)["education2"]*census3$ceducation2)
+    + (fixef(model.20.A)["education3"]*census3$ceducation3)
+    + (fixef(model.20.A)["education4"]*census3$ceducation4)               
+    + (fixef(model.20.A)["gender2"]*census3$cgender2)
+    + (fixef(model.20.A)["country_born2"]*census3$ccountry_born2)
+    + (fixef(model.20.A)["country_born3"]*census3$ccountry_born3)
+    + ranef(model.20.A)$state_name[census3$cstate_name,1])
+# Weight cell predictions by population frequency of each cell (per CED)
+cellpredictions.A.weighted <- cellpredictions.A*census3$cpercent.ced
+# Sum the weighted cell predictions for all cells in each CED
+cedpredictions.A <- 100*as.table(tapply(cellpredictions.A.weighted, census3$cced_name, sum))
+# export to csv file
+write.csv(cedpredictions.A, file = "cedpredict.model20.A.csv")
+```
+### Model 20.A results
+```{r fig.width=8, fig.height=5.7}
+cedpredictions.A <- as.data.frame(cedpredictions.A)
+cedpredictions.A <- cedpredictions.A %>%
+                     rename(
+                       ced = Var1,
+                       predLabTPP = Freq
+                       )
+cedpredictions.A$predLabwin <- ifelse(cedpredictions.A$predLabTPP>50,1,0)
+# join the predicted and actual election results
+cedpredictions.A <- merge(cedpredictions.A, outcomes, by = "ced")
+cedpredictions.A$abserror <- abs(cedpredictions.A$predLabTPP-cedpredictions.A$LabTPP)
+# calculate results metrics
+MAPE.A <- round(mean(cedpredictions.A$abserror), digits=2)
+maxerror.A <- round(max(cedpredictions.A$abserror), digits=2)
+predLabwin.A <- sum(cedpredictions.A$predLabwin)-2
+predcorrect.A <- sum(ifelse(cedpredictions.A$predLabwin==cedpredictions.A$Labwin,1,0))
+# put metrics into a data frame
+metrics.A <- as.data.frame(rbind(c("Model 20.A", MAPE.A, maxerror.A, predLabwin.A, predcorrect.A)))
+colnames(metrics.A) <- c("", "Mean absolute error (ppts)", "Max error (ppts)", "Predicted Labor wins", "Correct win predictions")
+# display results table
+kable(metrics.A, caption="**Model 20.A (omits CED random effects)**", digits=2)
+# plot predicted vs actual results
+plot(cedpredictions.A$LabTPP, cedpredictions.A$predLabTPP, xlim=c(20,80), ylim=c(20,80), main="Model 20.A",
+     col=ifelse(cedpredictions.A$predLabTPP>50 & cedpredictions.A$LabTPP<50, "red", 
+                ifelse(cedpredictions.A$predLabTPP<50 & cedpredictions.A$LabTPP>50, "red", "black")))
+abline(0,1)
+abline(v=50, lty=3)
+abline(h=50, lty=3)
+```
+
+```{r}
+```
+### Results summary
+Using a specification of model 20 which omits electorates as a random effect in the model results in electorate TPP predictions with a mean absolute percentage error of 2.74 ppts. Correct win/loss predictions are made in 141 of the 151 seats. Labor is predicted to win more than 50 per cent of the TPP vote in 66 seats (this includes Clark and Melbourne). The maximum error is 8.7 ppts and there are 24 electorates with an error greater than 5.0 ppts.
+
+### Add interactions
+### Gender x age
+```{r}
+# Gender x age interaction
+model.20.B <- glmer(lab2pp.2 ~ age_group4 + ced_2016lab2ppshare.fraction + education + gender +                          country_born + age_group4:gender + (1|state_name), family=binomial(link="logit"),                       data=data2)
+# post-stratify
+cellpredictions.B <- invlogit (fixef(model.20.B)["(Intercept)"]
+    + (fixef(model.20.B)["age_group4(34,49]"]*census3$cage_group4.34.49)
+    + (fixef(model.20.B)["age_group4(49,64]"]*census3$cage_group4.49.64)
+    + (fixef(model.20.B)["age_group4(64,104]"]*census3$cage_group4.64.104)
+    + (fixef(model.20.B)["ced_2016lab2ppshare.fraction"]*census3$cced_2016lab2ppshare.fraction)
+    + (fixef(model.20.B)["education2"]*census3$ceducation2)
+    + (fixef(model.20.B)["education3"]*census3$ceducation3)
+    + (fixef(model.20.B)["education4"]*census3$ceducation4)               
+    + (fixef(model.20.B)["gender2"]*census3$cgender2)
+    + (fixef(model.20.B)["country_born2"]*census3$ccountry_born2)
+    + (fixef(model.20.B)["country_born3"]*census3$ccountry_born3)
+    + (fixef(model.20.B)["age_group4(34,49]:gender2"]*census3$cgender2*census3$cage_group4.34.49)
+    + (fixef(model.20.B)["age_group4(49,64]:gender2"]*census3$cgender2*census3$cage_group4.49.64)
+    + (fixef(model.20.B)["age_group4(64,104]:gender2"]*census3$cgender2*census3$cage_group4.64.104)
+    + ranef(model.20.B)$state_name[census3$cstate_name,1])
+# Weight cell predictions by population frequency of each cell (per CED)
+cellpredictions.B.weighted <- cellpredictions.B*census3$cpercent.ced
+# Sum the weighted cell predictions for all cells in each CED
+cedpredictions.B <- 100*as.table(tapply(cellpredictions.B.weighted, census3$cced_name, sum))
+```
+### Model 20.B results
+```{r fig.width=8, fig.height=5.7}
+cedpredictions.B <- as.data.frame(cedpredictions.B)
+cedpredictions.B <- cedpredictions.B %>%
+                     rename(
+                       ced = Var1,
+                       predLabTPP = Freq
+                       )
+cedpredictions.B$predLabwin <- ifelse(cedpredictions.B$predLabTPP>50,1,0)
+# join the predicted and actual election results
+cedpredictions.B <- merge(cedpredictions.B, outcomes, by = "ced")
+cedpredictions.B$abserror <- abs(cedpredictions.B$predLabTPP-cedpredictions.B$LabTPP)
+# calculate results metrics
+MAPE.B <- round(mean(cedpredictions.B$abserror), digits=2)
+maxerror.B <- round(max(cedpredictions.B$abserror), digits=2)
+predLabwin.B <- sum(cedpredictions.B$predLabwin)-2
+predcorrect.B <- sum(ifelse(cedpredictions.B$predLabwin==cedpredictions.B$Labwin,1,0))
+# put metrics into a data frame
+metrics.B <- as.data.frame(rbind(c("Model 20.B", MAPE.B, maxerror.B, predLabwin.B, predcorrect.B)))
+colnames(metrics.B) <- c("", "Mean absolute error (ppts)", "Max error (ppts)", "Predicted Labor wins", "Correct win predictions")
+# display results table
+kable(metrics.B, caption="**Model 20.B (adds gender:age interaction)**", digits=2)
+# plot predicted vs actual results
+plot(cedpredictions.B$LabTPP, cedpredictions.B$predLabTPP, xlim=c(20,80), ylim=c(20,80), main="Model 20.B",
+     col=ifelse(cedpredictions.B$predLabTPP>50 & cedpredictions.B$LabTPP<50, "red", 
+                ifelse(cedpredictions.B$predLabTPP<50 & cedpredictions.B$LabTPP>50, "red", "black")))
+abline(0,1)
+abline(v=50, lty=3)
+abline(h=50, lty=3)
+```
+
+```{r}
+```
+### Gender x education
+```{r}
+# Gender x education interaction
+model.20.C <- glmer(lab2pp.2 ~ age_group4 + ced_2016lab2ppshare.fraction + education + gender +                          country_born + education:gender + (1|state_name), family=binomial(link="logit"),                           data=data2)
+# post-stratify
+cellpredictions.C <- invlogit (fixef(model.20.C)["(Intercept)"]
+    + (fixef(model.20.C)["age_group4(34,49]"]*census3$cage_group4.34.49)
+    + (fixef(model.20.C)["age_group4(49,64]"]*census3$cage_group4.49.64)
+    + (fixef(model.20.C)["age_group4(64,104]"]*census3$cage_group4.64.104)
+    + (fixef(model.20.C)["ced_2016lab2ppshare.fraction"]*census3$cced_2016lab2ppshare.fraction)
+    + (fixef(model.20.C)["education2"]*census3$ceducation2)
+    + (fixef(model.20.C)["education3"]*census3$ceducation3)
+    + (fixef(model.20.C)["education4"]*census3$ceducation4)               
+    + (fixef(model.20.C)["gender2"]*census3$cgender2)
+    + (fixef(model.20.C)["country_born2"]*census3$ccountry_born2)
+    + (fixef(model.20.C)["country_born3"]*census3$ccountry_born3)
+    + (fixef(model.20.C)["education2:gender2"]*census3$cgender2*census3$ceducation2)
+    + (fixef(model.20.C)["education3:gender2"]*census3$cgender2*census3$ceducation3)
+    + (fixef(model.20.C)["education4:gender2"]*census3$cgender2*census3$ceducation4)
+    + ranef(model.20.C)$state_name[census3$cstate_name,1])
+# Weight cell predictions by population frequency of each cell (per CED)
+cellpredictions.C.weighted <- cellpredictions.C*census3$cpercent.ced
+# Sum the weighted cell predictions for all cells in each CED
+cedpredictions.C <- 100*as.table(tapply(cellpredictions.C.weighted, census3$cced_name, sum))
+```
+### Model 20.C results
+```{r fig.width=8, fig.height=5.7}
+cedpredictions.C <- as.data.frame(cedpredictions.C)
+cedpredictions.C <- cedpredictions.C %>%
+                     rename(
+                       ced = Var1,
+                       predLabTPP = Freq
+                       )
+cedpredictions.C$predLabwin <- ifelse(cedpredictions.C$predLabTPP>50,1,0)
+# join the predicted and actual election results
+cedpredictions.C <- merge(cedpredictions.C, outcomes, by = "ced")
+cedpredictions.C$abserror <- abs(cedpredictions.C$predLabTPP-cedpredictions.C$LabTPP)
+# calculate results metrics
+MAPE.C <- round(mean(cedpredictions.C$abserror),digits=2)
+maxerror.C <- round(max(cedpredictions.C$abserror), digits=2)
+predLabwin.C <- sum(cedpredictions.C$predLabwin)-2
+predcorrect.C <- sum(ifelse(cedpredictions.C$predLabwin==cedpredictions.C$Labwin,1,0))
+# put metrics into a data frame
+metrics.C <- as.data.frame(rbind(c("Model 20.C", MAPE.C, maxerror.C, predLabwin.C, predcorrect.C)))
+colnames(metrics.C) <- c("", "Mean absolute error (ppts)", "Max error (ppts)", "Predicted Labor wins", "Correct win predictions")
+# display results table
+kable(metrics.C, caption="**Model 20.C (gender:education interaction)**", digits=2)
+# plot predicted vs actual results
+plot(cedpredictions.C$LabTPP, cedpredictions.C$predLabTPP, xlim=c(20,80), ylim=c(20,80), main="Model 20.C",
+     col=ifelse(cedpredictions.C$predLabTPP>50 & cedpredictions.C$LabTPP<50, "red", 
+                ifelse(cedpredictions.C$predLabTPP<50 & cedpredictions.C$LabTPP>50, "red", "black")))
+abline(0,1)
+abline(v=50, lty=3)
+abline(h=50, lty=3)
+```
+
+```{r}
+```
+### Education x age
+```{r fig.width=8, fig.height=6}
+model.20.D <- glmer(lab2pp.2 ~ age_group4 + ced_2016lab2ppshare.fraction + education + gender +                          country_born + education:age_group4 + (1|state_name), family=binomial(link="logit"),                           data=data2)
+summary(model.20.D)
+# plot fixed effects
+library("effects")
+plot(predictorEffects(model.20.D), selection=1)
+```
+
+```{r}
+```
+### Interpreting interaction effect
+
+The effects plot for the age x education interaction showed that the negative association between age and probability of voting Labor was observed for people whose highest educational level was school and post-school qualifications. However the negative association between age and propensity to vote Labor was significantly diminished for people with university education levels. Thus for people with school or post-school education, the probability of voting Labor fell from about 68-70 per cent for the youngest age group (18-34) to about 28-30 per cent for the oldest age group (65 and over). However for those with university education the probability of voting Labor fell from about 65 per cent for the youngest age group to about 50 per cent for the oldest age group and also around 50 per cent for each of the other two groups, suggesting that completion of a university education strongly inhibits the propensity to vote against Labor among older people.
+
+```{r}
+# post stratify
+cellpredictions.D <- invlogit (fixef(model.20.C)["(Intercept)"]
+    + (fixef(model.20.D)["age_group4(34,49]"]*census3$cage_group4.34.49)
+    + (fixef(model.20.D)["age_group4(49,64]"]*census3$cage_group4.49.64)
+    + (fixef(model.20.D)["age_group4(64,104]"]*census3$cage_group4.64.104)
+    + (fixef(model.20.D)["ced_2016lab2ppshare.fraction"]*census3$cced_2016lab2ppshare.fraction)
+    + (fixef(model.20.D)["education2"]*census3$ceducation2)
+    + (fixef(model.20.D)["education3"]*census3$ceducation3)
+    + (fixef(model.20.D)["education4"]*census3$ceducation4)               
+    + (fixef(model.20.D)["gender2"]*census3$cgender2)
+    + (fixef(model.20.D)["country_born2"]*census3$ccountry_born2)
+    + (fixef(model.20.D)["country_born3"]*census3$ccountry_born3)
+    + (fixef(model.20.D)["age_group4(34,49]:education2"]*census3$cage_group4.34.49*census3$ceducation2)
+    + (fixef(model.20.D)["age_group4(34,49]:education2"]*census3$cage_group4.34.49*census3$ceducation2)
+     + (fixef(model.20.D)["age_group4(49,64]:education2"]*census3$cage_group4.49.64*census3$ceducation2)
+     + (fixef(model.20.D)["age_group4(64,104]:education2"]*census3$cage_group4.64.104*census3$ceducation2)
+     + (fixef(model.20.D)["age_group4(34,49]:education3"]*census3$cage_group4.34.49*census3$ceducation3)
+     + (fixef(model.20.D)["age_group4(49,64]:education3"]*census3$cage_group4.49.64*census3$ceducation3)
+     + (fixef(model.20.D)["age_group4(64,104]:education3"]*census3$cage_group4.64.104*census3$ceducation3)
+     + (fixef(model.20.D)["age_group4(34,49]:education4"]*census3$cage_group4.34.49*census3$ceducation4)
+     + (fixef(model.20.D)["age_group4(49,64]:education4"]*census3$cage_group4.49.64*census3$ceducation4)
+    + (fixef(model.20.D)["age_group4(64,104]:education4"]*census3$cage_group4.64.104*census3$ceducation4)
+    + ranef(model.20.D)$state_name[census3$cstate_name,1])
+# Weight cell predictions by population frequency of each cell (per CED)
+cellpredictions.D.weighted <- cellpredictions.D*census3$cpercent.ced
+# Sum the weighted cell predictions for all cells in each CED
+cedpredictions.D <- 100*as.table(tapply(cellpredictions.D.weighted, census3$cced_name, sum))
+```
+### Model 20.D results
+```{r fig.width=8, fig.height=5.7}
+cedpredictions.D <- as.data.frame(cedpredictions.D)
+cedpredictions.D <- cedpredictions.D %>%
+                     rename(
+                       ced = Var1,
+                       predLabTPP = Freq
+                       )
+cedpredictions.D$predLabwin <- ifelse(cedpredictions.D$predLabTPP>50,1,0)
+# join the predicted and actual election results
+cedpredictions.D <- merge(cedpredictions.D, outcomes, by = "ced")
+cedpredictions.D$abserror <- abs(cedpredictions.D$predLabTPP-cedpredictions.D$LabTPP)
+# calculate results metrics
+MAPE.D <- round(mean(cedpredictions.D$abserror), digits=2)
+maxerror.D <- round(max(cedpredictions.D$abserror), digits=2)
+predLabwin.D <- sum(cedpredictions.D$predLabwin)-2
+predcorrect.D <- sum(ifelse(cedpredictions.D$predLabwin==cedpredictions.D$Labwin,1,0))
+# put metrics into a data frame
+metrics.D <- as.data.frame(rbind(c("Model 20.D", MAPE.D, maxerror.D, predLabwin.D, predcorrect.D)))
+colnames(metrics.D) <- c("", "Mean absolute error (ppts)", "Max error (ppts)", "Predicted Labor wins", "Correct win predictions")
+# display results table
+kable(metrics.D, caption="**Model 20.D (education:age interaction)**", digits=2)
+# plot predicted vs actual results
+plot(cedpredictions.D$LabTPP, cedpredictions.D$predLabTPP, xlim=c(20,80), ylim=c(20,80), main="Model 20.D",
+     col=ifelse(cedpredictions.D$predLabTPP>50 & cedpredictions.D$LabTPP<50, "red", 
+                ifelse(cedpredictions.D$predLabTPP<50 & cedpredictions.D$LabTPP>50, "red", "black")))
+abline(0,1)
+abline(v=50, lty=3)
+abline(h=50, lty=3)
+```
+## Exclude 2016 voteshare as fixed effect, inlcude CED random effect
+```{r}
+# Estimate model
+model.20.E <- glmer(lab2pp.2 ~ age_group4 + education + gender + country_born + (1|state_name) + (1|ced_name), family=binomial(link="logit"), data=data2)
+# Generate cell predictions 
+cellpredictions.E <- invlogit (fixef(model.20.E)["(Intercept)"]
+    + (fixef(model.20.E)["age_group4(34,49]"]*census3$cage_group4.34.49)
+    + (fixef(model.20.E)["age_group4(49,64]"]*census3$cage_group4.49.64)
+    + (fixef(model.20.E)["age_group4(64,104]"]*census3$cage_group4.64.104)
+    + (fixef(model.20.E)["education2"]*census3$ceducation2)
+    + (fixef(model.20.E)["education3"]*census3$ceducation3)
+    + (fixef(model.20.E)["education4"]*census3$ceducation4)               
+    + (fixef(model.20.E)["gender2"]*census3$cgender2)
+    + (fixef(model.20.E)["country_born2"]*census3$ccountry_born2)
+    + (fixef(model.20.E)["country_born3"]*census3$ccountry_born3)
+    + ranef(model.20.E)$state_name[census3$cstate_name,1]
+    + ranef(model.20.E)$ced_name[census3$cced_name,1])
+# Weight cell predictions by population frequency of each cell (per CED)
+cellpredictions.E.weighted <- cellpredictions.E*census3$cpercent.ced
+# Sum the weighted cell predictions for all cells in each CED
+cedpredictions.E <- 100*as.table(tapply(cellpredictions.E.weighted, census3$cced_name, sum))
+```
+## Model 20.E results
+``` {r, fig.width=8, fig.height=5.7}
+cedpredictions.E <- as.data.frame(cedpredictions.E)
+cedpredictions.E <- cedpredictions.E %>%
+                     rename(
+                       ced = Var1,
+                       predLabTPP = Freq
+                       )
+cedpredictions.E$predLabwin <- ifelse(cedpredictions.E$predLabTPP>50,1,0)
+# join the predicted and actual election results
+cedpredictions.E <- merge(cedpredictions.E, outcomes, by = "ced")
+cedpredictions.E$abserror <- abs(cedpredictions.E$predLabTPP-cedpredictions.E$LabTPP)
+# calculate results metrics
+MAPE.E <- round(mean(cedpredictions.E$abserror), digits=2)
+maxerror.E <- round(max(cedpredictions.E$abserror), digits=2)
+predLabwin.E <- sum(cedpredictions.E$predLabwin)-2
+predcorrect.E <- sum(ifelse(cedpredictions.E$predLabwin==cedpredictions.E$Labwin,1,0))
+# put metrics into a data frame
+metrics.E <- as.data.frame(rbind(c("Model 20.E", MAPE.E, maxerror.E, predLabwin.E, predcorrect.E)))
+colnames(metrics.E) <- c("", "Mean absolute error (ppts)", "Max error (ppts)", "Predicted Labor wins", "Correct win predictions")
+# display results table
+kable(metrics.E, caption="**Model 20.E (omi 2016 vote as fixed effect)**", digits=2)
+# plot predicted vs actual results
+plot(cedpredictions.E$LabTPP, cedpredictions.E$predLabTPP, xlim=c(20,80), ylim=c(20,80), main="Model 20.E",
+     col=ifelse(cedpredictions.E$predLabTPP>50 & cedpredictions.E$LabTPP<50, "red", 
+                ifelse(cedpredictions.E$predLabTPP<50 & cedpredictions.E$LabTPP>50, "red", "black")))
+abline(0,1)
+abline(v=50, lty=3)
+abline(h=50, lty=3)
+```
+
+```{r}
+```
+### Overall results table and plot
+```{r fig.width=11, fig.height=9}
+metricsall <- rbind(metrics, metrics.A, metrics.B, metrics.C, metrics.D, metrics.E)
+kable(metricsall, caption="**Results summary**", digits=2)
+par(mar=rep(2,4)) # reduces size of margins
+par(mfrow=c(3,2))
+plot(cedpredictions$LabTPP, cedpredictions$predLabTPP, xlim=c(20,80), ylim=c(20,80), main="Model 20", xlab="", ylab="", col=ifelse(cedpredictions$predLabTPP>50 & cedpredictions$LabTPP<50, "red", 
+                ifelse(cedpredictions$predLabTPP<50 & cedpredictions$LabTPP>50, "red", "black")))
+abline(0,1)
+abline(v=50, lty=3)
+abline(h=50, lty=3)
+
+plot(cedpredictions.A$LabTPP, cedpredictions.A$predLabTPP, xlim=c(20,80), ylim=c(20,80), main="Model 20.A",
+     xlab="", ylab="", col=ifelse(cedpredictions.A$predLabTPP>50 & cedpredictions.A$LabTPP<50, "red", 
+                ifelse(cedpredictions.A$predLabTPP<50 & cedpredictions.A$LabTPP>50, "red", "black")))
+abline(0,1)
+abline(v=50, lty=3)
+abline(h=50, lty=3)
+
+plot(cedpredictions.B$LabTPP, cedpredictions.B$predLabTPP, xlim=c(20,80), ylim=c(20,80), main="Model 20.B",
+     xlab="", ylab="", col=ifelse(cedpredictions.B$predLabTPP>50 & cedpredictions.B$LabTPP<50, "red", 
+                ifelse(cedpredictions.B$predLabTPP<50 & cedpredictions.B$LabTPP>50, "red", "black")))
+abline(0,1)
+abline(v=50, lty=3)
+abline(h=50, lty=3)
+
+plot(cedpredictions.C$LabTPP, cedpredictions.C$predLabTPP, xlim=c(20,80), ylim=c(20,80), main="Model 20.C",
+     xlab="", ylab="", col=ifelse(cedpredictions.C$predLabTPP>50 & cedpredictions.C$LabTPP<50, "red", 
+                ifelse(cedpredictions.C$predLabTPP<50 & cedpredictions.C$LabTPP>50, "red", "black")))
+abline(0,1)
+abline(v=50, lty=3)
+abline(h=50, lty=3)
+
+plot(cedpredictions.D$LabTPP, cedpredictions.D$predLabTPP, xlim=c(20,80), ylim=c(20,80), main="Model 20.D",
+     xlab="", ylab="", col=ifelse(cedpredictions.D$predLabTPP>50 & cedpredictions.D$LabTPP<50, "red", 
+                ifelse(cedpredictions.D$predLabTPP<50 & cedpredictions.D$LabTPP>50, "red", "black")))
+abline(0,1)
+abline(v=50, lty=3)
+abline(h=50, lty=3)
+
+plot(cedpredictions.E$LabTPP, cedpredictions.E$predLabTPP, xlim=c(20,80), ylim=c(20,80), main="Model 20.E",
+     col=ifelse(cedpredictions.E$predLabTPP>50 & cedpredictions.E$LabTPP<50, "red", 
+                ifelse(cedpredictions.E$predLabTPP<50 & cedpredictions.E$LabTPP>50, "red", "black")))
+abline(0,1)
+abline(v=50, lty=3)
+abline(h=50, lty=3)
+```
+
