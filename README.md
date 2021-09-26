@@ -8,5 +8,3 @@ There are three data files:
 - election2019.csv has the 2019 two-party preferred election results by Division.
 
 The R Markdown file MRP-preferred-model.Rmd is used to carry out the MRP analysis.
-
-The results of the analysis are in the HTML. The file cedpredict.model20.A.csv contains an example of the predicted results for each Division from one of the model specifications.
