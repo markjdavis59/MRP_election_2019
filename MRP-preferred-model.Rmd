@@ -160,7 +160,7 @@ The coefficients and plots show:
 
 - Country of birth: Australian-born respondents had a 49 per cent probability of voting Labor while those born outside Australia had a 44 per cent probability (and those who did not respond to the question on country of birth had a 49 per cent probability)
 
-- 2016 vote: For every one percentage point increase in a voter's electorate's 2016 Labor TPP vote, there was a 0.78 percentage point increase in the voter's probability of voting Labor in 2016.
+- 2016 vote: For every one percentage point increase in a voter's electorate's 2016 Labor TPP vote, there was a 0.78 percentage point increase in the voter's probability of voting Labor in 2019.
 
 - The values of the intercepts are difficult to interpret. The fixed intercept of -1.10 can be interpreted as the mean of the (logit of the) Labor 2PP dependent variable for all voters in the AES survey when the value of Labor's 2016 2PP vote share is zero and for a voter who is male, has school level education, is aged 18-34 and born in Australia. The intercepts for the state random effects can be interpreted as the means of the dependent variable (for this deomgraphic "reference case" voter) across voters in each of the state groups or clusters. These state intercepts range from +0.23 for the ACT, (indicating that a voter in the ACT is 5.5 percentage points more likely to vote 2PP Labor than the mean across the whole sample for the demographic reference case voter) to -0.24 for Queensland (indicating Queenslanders were 6 percentage points less likely to vote 2PP Labor compared to the sample-wide average average).
 ```{r}
